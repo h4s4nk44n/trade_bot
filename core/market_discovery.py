@@ -974,8 +974,8 @@ class MarketDiscovery:
     async def start_persistent_browser(self, initial_slug: str | None = None):
         """Launch a persistent headless Chromium and navigate to the market page.
 
-        Call once at bot startup. The page stays open and auto-updates via
-        Polymarket's client-side JS, just like a real browser tab.
+        Call once at bot startup. The browser is reused across cycles;
+        only the page is replaced when needed.
         """
         try:
             from playwright.async_api import async_playwright
@@ -994,6 +994,12 @@ class MarketDiscovery:
                 )
                 logger.info("playwright_browser_launched")
 
+            if hasattr(self, "_pw_page") and self._pw_page:
+                try:
+                    await self._pw_page.close()
+                except Exception:
+                    pass
+
             self._pw_page = await self._pw_browser.new_page()
 
             if initial_slug:
@@ -1004,6 +1010,18 @@ class MarketDiscovery:
         except Exception as e:
             logger.error("playwright_start_failed", error=str(e))
             self._pw_page = None
+            if hasattr(self, "_pw_browser") and self._pw_browser:
+                try:
+                    await self._pw_browser.close()
+                except Exception:
+                    pass
+                self._pw_browser = None
+            if hasattr(self, "_pw_instance") and self._pw_instance:
+                try:
+                    await self._pw_instance.stop()
+                except Exception:
+                    pass
+                self._pw_instance = None
 
     async def read_price_to_beat_live(self, slug: str) -> Optional[Decimal]:
         """Read "Price to beat" from the persistent Playwright page.
@@ -1102,7 +1120,13 @@ class MarketDiscovery:
                 slug=slug,
                 error=str(e),
             )
-            # Page may have crashed — try to recover with a new page
+            # Page may have crashed — close it and try to recover with a new one
+            old_page = getattr(self, "_pw_page", None)
+            if old_page:
+                try:
+                    await old_page.close()
+                except Exception:
+                    pass
             try:
                 if hasattr(self, "_pw_browser") and self._pw_browser:
                     self._pw_page = await self._pw_browser.new_page()

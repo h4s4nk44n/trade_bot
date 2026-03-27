@@ -168,6 +168,25 @@ class Strategy:
             )
             return None
 
+        # Verify Binance move is sustained (not a single-tick spike).
+        # Check last 5 seconds of Binance ticks — at least 80% must agree on direction.
+        now_ms = int(time.time() * 1000)
+        recent_cutoff = now_ms - 5000  # last 5 seconds
+        recent_ticks = [(ts, float(p)) for ts, p in state.price_history if ts >= recent_cutoff]
+
+        if len(recent_ticks) >= 3:  # need at least 3 ticks to judge
+            ticks_agreeing = sum(1 for _, p in recent_ticks if (p > anchor) == binance_says_up)
+            agreement_pct = ticks_agreeing / len(recent_ticks)
+            if agreement_pct < 0.80:
+                logger.info(
+                    "signal_skip",
+                    reason="binance_momentum_unstable",
+                    agreement_pct=round(agreement_pct, 2),
+                    ticks_checked=len(recent_ticks),
+                    direction="UP" if binance_says_up else "DOWN",
+                )
+                return None
+
         # Blend Chainlink (confirmed) with Binance (leading indicator) to
         # predict where Chainlink will be at resolution. Binance moves first,
         # Chainlink follows — so incorporating Binance gives us a forward-looking
@@ -214,6 +233,11 @@ class Strategy:
             best_bid = state.best_bid_down
             market_price = market_prob_down
 
+        # Update dashboard state even if we don't trade — helps debugging
+        state.current_true_prob = true_prob_up
+        state.current_edge = edge
+        state.current_signal_direction = direction
+
         # Check minimum edge — only trade if we think our side is underpriced
         if edge < self.min_edge:
             logger.info(
@@ -224,6 +248,9 @@ class Strategy:
                 min_required=self.min_edge,
                 true_prob=round(true_prob_up, 4),
                 market_prob=round(market_prob_up, 4),
+                predicted_price=round(predicted_price, 2),
+                chainlink=round(current, 2),
+                binance=round(binance, 2),
             )
             return None
 
@@ -354,11 +381,10 @@ class Strategy:
         # Standard deviation of remaining price movement
         sigma = volatility_per_second * math.sqrt(remaining_seconds)
 
-        # Floor: never let sigma drop below 0.6% — prevents overconfident
-        # probability estimates from small price moves in quiet markets.
-        # BTC's typical 5-minute realized vol is 0.15-0.30%; floor at 0.6%
-        # ensures the model can never be more than ~57% confident on noise.
-        sigma = max(sigma, 0.006)
+        # Floor: prevent extreme confidence at very short remaining times.
+        # At 30s remaining, natural sigma = 0.0027 (above floor).
+        # Floor only activates below ~16s remaining as a safety net.
+        sigma = max(sigma, 0.002)
 
         if sigma == 0:
             return 1.0 if current_price >= anchor_price else 0.0

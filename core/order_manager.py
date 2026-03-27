@@ -7,7 +7,6 @@ from config.settings import Settings
 from core.state import SharedState
 from core.strategy import Strategy
 from data.models import Order, OrderStatus, Signal
-from execution.paper_trader import PaperTrader
 from execution.trader_interface import TraderInterface
 from monitoring.logger import get_logger
 
@@ -49,12 +48,14 @@ class OrderManager:
         strategy: Strategy,
         state: SharedState,
         settings: Settings,
+        risk_manager=None,
     ):
         self.trader = trader
         self.strategy = strategy
         self.state = state
         self.cancel_replace_interval = settings.cancel_replace_interval_ms / 1000.0
         self.bankroll = settings.initial_bankroll
+        self._risk_manager = risk_manager
 
         # Active orders tracking
         self._active_orders: dict[str, Order] = {}  # order_id -> Order
@@ -91,11 +92,21 @@ class OrderManager:
                         active_orders=len(self._active_orders),
                     )
                     last_heartbeat = start
-                # Sync bankroll from paper trader if applicable
-                if isinstance(self.trader, PaperTrader):
-                    self.bankroll = float(self.trader.bankroll)
+                await self.trader.sync_state()
+                self.bankroll = float(self.trader.current_bankroll)
 
-                # Generate fresh signal
+                self.state.open_positions = self.trader.current_positions
+                self.state.paper_bankroll = self.trader.current_bankroll
+                self.state.session_pnl = self.trader.current_pnl
+
+                if self._risk_manager:
+                    self._risk_manager.update_equity(self.bankroll)
+                    total_exposure = sum(
+                        float(p.size * p.avg_entry_price)
+                        for p in self.trader.current_positions.values()
+                    )
+                    self._risk_manager.update_exposure(total_exposure)
+
                 signal = self.strategy.generate_signal(self.state, self.bankroll)
 
                 # Check if we should exit positions
@@ -177,8 +188,7 @@ class OrderManager:
                 self._active_orders[order.order_id] = order
                 self.state.open_orders[order.order_id] = order
 
-                # For paper trading: check if order fills immediately vs orderbook
-                if isinstance(self.trader, PaperTrader):
+                if hasattr(self.trader, "on_immediate_fill_check"):
                     is_up_token = (
                         market
                         and signal.token_id == market.token_id_up
@@ -194,7 +204,6 @@ class OrderManager:
                     await self.trader.on_immediate_fill_check(
                         order, best_ask, best_bid
                     )
-                    # If filled, remove from active tracking
                     if order.status != OrderStatus.LIVE:
                         self._active_orders.pop(order.order_id, None)
                         self.state.open_orders.pop(order.order_id, None)
@@ -251,8 +260,7 @@ class OrderManager:
                     if order.status == OrderStatus.LIVE:
                         self._active_orders[order.order_id] = order
 
-                        # For paper trading: check immediate fill
-                        if isinstance(self.trader, PaperTrader):
+                        if hasattr(self.trader, "on_immediate_fill_check"):
                             is_up = token_id == getattr(
                                 self.state.current_market, "token_id_up", ""
                             )

@@ -2,7 +2,7 @@ import time
 from decimal import Decimal
 from typing import Optional
 
-from data.models import Order, OrderStatus, Side
+from data.models import Order, OrderStatus, Position, Side
 from execution.trader_interface import TraderInterface
 from monitoring.logger import get_logger
 
@@ -22,6 +22,7 @@ class LiveTrader(TraderInterface):
         self,
         private_key: str,
         funder_address: str,
+        initial_bankroll: float = 0.0,
         clob_url: str = "https://clob.polymarket.com",
         chain_id: int = 137,
     ):
@@ -32,6 +33,11 @@ class LiveTrader(TraderInterface):
         self._client = None
         self._fee_rate_cache: dict[str, int] = {}  # token_id -> fee_rate_bps
         self._initialized = False
+
+        self._bankroll = Decimal(str(initial_bankroll))
+        self._positions: dict[str, Position] = {}
+        self._realized_pnl = Decimal("0")
+        self._last_sync_mono: float = 0.0
 
     async def initialize(self):
         """Initialize the CLOB client and derive API credentials."""
@@ -166,9 +172,76 @@ class LiveTrader(TraderInterface):
             return []
 
     async def get_balances(self) -> dict[str, Decimal]:
-        # py-clob-client doesn't have a direct balance check
-        # The user should check via Polymarket UI or Polygon chain
-        return {"usdc": Decimal("0"), "positions": {}}
+        if not self._initialized:
+            return {"usdc": self._bankroll, "positions": {}}
+
+        try:
+            balance_wei = self._client.get_balance()
+            usdc = Decimal(str(int(balance_wei))) / Decimal("1000000")
+            return {"usdc": usdc, "positions": {
+                tid: pos.size for tid, pos in self._positions.items()
+            }}
+        except Exception as e:
+            logger.error("live_get_balances_failed", error=str(e))
+            return {"usdc": self._bankroll, "positions": {}}
+
+    async def sync_state(self) -> None:
+        """Poll CLOB API for current positions and balance.
+
+        Called every order manager cycle to keep bankroll, positions,
+        and P&L in sync with the exchange.
+        """
+        if not self._initialized:
+            return
+
+        now = time.monotonic()
+        if now - self._last_sync_mono < 2.0:
+            return
+        self._last_sync_mono = now
+
+        try:
+            raw_positions = self._client.get_positions()
+            new_positions: dict[str, Position] = {}
+            for raw in raw_positions:
+                token_id = raw["asset"]["token_id"]
+                condition_id = raw["asset"].get("condition_id", "")
+                size = Decimal(str(raw["size"]))
+                avg_price = Decimal(str(raw["avgPrice"]))
+                if size > 0:
+                    new_positions[token_id] = Position(
+                        token_id=token_id,
+                        outcome="",
+                        size=size,
+                        avg_entry_price=avg_price,
+                        market_condition_id=condition_id,
+                    )
+            self._positions = new_positions
+        except Exception as e:
+            logger.warning("live_sync_positions_failed", error=str(e))
+
+        try:
+            balance_wei = self._client.get_balance()
+            self._bankroll = Decimal(str(int(balance_wei))) / Decimal("1000000")
+        except Exception as e:
+            logger.warning("live_sync_balance_failed", error=str(e))
+
+        logger.debug(
+            "live_state_synced",
+            bankroll=float(self._bankroll),
+            positions=len(self._positions),
+        )
+
+    @property
+    def current_bankroll(self) -> Decimal:
+        return self._bankroll
+
+    @property
+    def current_positions(self) -> dict[str, Position]:
+        return self._positions.copy()
+
+    @property
+    def current_pnl(self) -> Decimal:
+        return self._realized_pnl
 
     async def resolve_market(
         self,
@@ -178,14 +251,16 @@ class LiveTrader(TraderInterface):
         """Handle market resolution for live trading.
 
         On Polymarket, resolved markets are settled automatically by the
-        protocol — winning shares redeem for $1, losing for $0. No action
-        needed from the trader.
+        protocol — winning shares redeem for $1, losing for $0.
+        Sync state afterward to pick up updated balance.
         """
         logger.info(
             "live_market_resolved",
             winning_token=winning_token_id[:8],
             losing_token=losing_token_id[:8],
         )
+        self._last_sync_mono = 0.0
+        await self.sync_state()
 
     def clear_fee_cache(self):
         """Clear fee rate cache (needed on market transition)."""

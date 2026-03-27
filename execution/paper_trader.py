@@ -380,7 +380,7 @@ class PaperTrader(TraderInterface):
     def equity(self) -> Decimal:
         """Current equity = bankroll + unrealized value of positions."""
         unrealized = sum(
-            pos.size * pos.avg_entry_price  # Mark-to-market approximation
+            pos.size * pos.avg_entry_price
             for pos in self._positions.values()
         )
         return self.bankroll + unrealized
@@ -388,3 +388,15 @@ class PaperTrader(TraderInterface):
     @property
     def positions(self) -> dict[str, Position]:
         return self._positions.copy()
+
+    @property
+    def current_bankroll(self) -> Decimal:
+        return self.bankroll
+
+    @property
+    def current_positions(self) -> dict[str, Position]:
+        return self._positions.copy()
+
+    @property
+    def current_pnl(self) -> Decimal:
+        return self._realized_pnl

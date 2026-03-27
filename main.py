@@ -125,6 +125,7 @@ class Bot:
             live_trader = LiveTrader(
                 private_key=self.settings.polymarket_private_key.get_secret_value(),
                 funder_address=self.settings.polymarket_funder_address,
+                initial_bankroll=self.settings.initial_bankroll,
                 clob_url=self.settings.polymarket_clob_url,
             )
             await live_trader.initialize()
@@ -152,17 +153,18 @@ class Bot:
             )
             self.trader.set_shared_state(self.state)
 
-        # 8. Initialize order manager
+        # 8. Initialize risk manager
+        self.risk_manager = RiskManager(self.settings, self.db, self.state)
+        self.risk_manager.set_halt_callback(self._on_risk_halt)
+
+        # 9. Initialize order manager
         self.order_manager = OrderManager(
             trader=self.trader,
             strategy=self.strategy,
             state=self.state,
             settings=self.settings,
+            risk_manager=self.risk_manager,
         )
-
-        # 9. Initialize risk manager
-        self.risk_manager = RiskManager(self.settings, self.db, self.state)
-        self.risk_manager.set_halt_callback(self._on_risk_halt)
 
         # 10. Initialize monitoring
         self.dashboard = Dashboard(
@@ -921,7 +923,7 @@ class Bot:
                     self.state.polymarket_connected = True
 
                 async def on_trade(asset_id, price, size, ts):
-                    if isinstance(self.trader, PaperTrader):
+                    if hasattr(self.trader, "on_trade_event"):
                         await self.trader.on_trade_event(asset_id, price, size, ts)
 
                 # Start polymarket feed in a separate task
