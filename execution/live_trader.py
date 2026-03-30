@@ -48,7 +48,7 @@ class LiveTrader(TraderInterface):
                 host=self._clob_url,
                 key=self._private_key,
                 chain_id=self._chain_id,
-                signature_type=0,  # EOA wallet
+                signature_type=1,  # Polymarket proxy wallet (email/Google login)
                 funder=self._funder_address,
             )
 
@@ -59,6 +59,13 @@ class LiveTrader(TraderInterface):
 
             # Immediately sync real balance from Polymarket
             await self.sync_state()
+
+            # Debug: write balance info to file
+            with open("data/balance_debug.txt", "w") as f:
+                f.write(f"initialized: {self._initialized}\n")
+                f.write(f"bankroll: {self._bankroll}\n")
+                f.write(f"positions: {len(self._positions)}\n")
+
             logger.info(
                 "live_trader_initialized",
                 usdc_balance=float(self._bankroll),
@@ -107,7 +114,7 @@ class LiveTrader(TraderInterface):
 
         start = time.monotonic()
         signed_order = self._client.create_order(order_args)
-        response = self._client.post_order(signed_order, order_type=OrderType.GTC)
+        response = self._client.post_order(signed_order, orderType=OrderType.GTC)
         latency_ms = (time.monotonic() - start) * 1000
 
         order_id = response.get("orderID", response.get("order_id", ""))
@@ -206,12 +213,14 @@ class LiveTrader(TraderInterface):
         and get_trades to reconstruct open positions from recent fills.
         """
         if not self._initialized:
+            logger.info("sync_state_skipped_not_initialized")
             return
 
         now = time.monotonic()
         if now - self._last_sync_mono < 2.0:
             return
         self._last_sync_mono = now
+        logger.info("sync_state_running")
 
         # Sync positions from recent trades
         try:
@@ -260,6 +269,15 @@ class LiveTrader(TraderInterface):
 
             params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
             result = self._client.get_balance_allowance(params)
+            # Debug: append raw response to file
+            with open("data/balance_debug.txt", "a") as f:
+                f.write(f"raw_result_type: {type(result).__name__}\n")
+                f.write(f"raw_result: {result}\n")
+            logger.info(
+                "balance_api_raw_response",
+                result_type=type(result).__name__,
+                result=str(result),
+            )
             balance_str = result.get("balance", "0") if isinstance(result, dict) else "0"
             self._bankroll = Decimal(balance_str) / Decimal("1000000")
         except Exception as e:

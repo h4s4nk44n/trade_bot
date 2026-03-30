@@ -44,7 +44,12 @@ class WebDashboard:
         self.state = state
         self.risk = risk_manager
         self.orders = order_manager
-        self._trading_paused = False  # Pause flag for start/stop controls
+        self._trading_paused = True  # Start paused — user must click Start on Web UI
+        self.state.trading_paused = True
+
+        # Set risk halt so no trades are placed until user starts via Web UI
+        self.risk.risk_state.is_halted = True
+        self.risk.risk_state.halt_reason = "user_paused"
 
         self.app = FastAPI(title="Polymarket Bot Dashboard", docs_url=None, redoc_url=None)
         self._setup_routes()

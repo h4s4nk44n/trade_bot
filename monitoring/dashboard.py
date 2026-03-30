@@ -105,8 +105,12 @@ class Dashboard:
         poly_status = "[green]OK[/]" if self.state.polymarket_connected else "[red]DOWN[/]"
         chain_status = "[green]OK[/]" if self.state.chainlink_connected else "[red]DOWN[/]"
 
+        paused = getattr(self.state, 'trading_paused', False)
+        trading_status = "[red bold]PAUSED[/]" if paused else "[green bold]ACTIVE[/]"
+
         text = (
             f"  [{mode_color}]{mode} MODE[/]  |  "
+            f"Trading: {trading_status}  |  "
             f"Uptime: {hours:02d}:{minutes:02d}:{seconds:02d}  |  "
             f"Binance: {binance_status}  Polymarket: {poly_status}  Chainlink: {chain_status}"
         )
@@ -383,7 +387,8 @@ class Dashboard:
 
     def _footer_panel(self) -> Panel:
         now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
-        return Panel(f"  {now}  |  Ctrl+C to stop", style="dim")
+        web_url = f"http://{self.settings.dashboard_host}:{self.settings.dashboard_port}"
+        return Panel(f"  {now}  |  Web UI: [bold cyan]{web_url}[/]  |  Ctrl+C to stop", style="dim")
 
     @staticmethod
     def _probability_bar(prob: float, width: int = 20) -> str:
