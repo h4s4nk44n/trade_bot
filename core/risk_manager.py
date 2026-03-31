@@ -54,6 +54,10 @@ class RiskManager:
             return False
 
         # 3. Per-trade cap
+        # trade_value = dollar cost of this trade
+        # signal.kelly_size = number of shares (converted from dollars in strategy.py)
+        # signal.price = cost per share
+        # So: shares × price_per_share = total dollar cost
         trade_value = float(signal.kelly_size) * float(signal.price)
         max_trade = self.risk_state.bankroll * self.settings.max_position_pct
         if trade_value > max_trade:
@@ -64,7 +68,9 @@ class RiskManager:
             )
             return False
 
-        # 4. Concurrent exposure cap
+        # 4. Concurrent exposure cap (all values in dollar terms)
+        # risk_state.total_exposure is set by order_manager as sum(p.size * p.avg_entry_price)
+        # trade_value above is also in dollars — units are consistent
         total_exposure = self.risk_state.total_exposure + trade_value
         max_exposure = self.risk_state.bankroll * self.settings.max_concurrent_exposure_pct
         if total_exposure > max_exposure:

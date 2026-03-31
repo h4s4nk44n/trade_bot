@@ -29,7 +29,7 @@ class Strategy:
         self.max_concurrent_exposure_pct = settings.max_concurrent_exposure_pct
         self.entry_window_sec = settings.market_entry_window_sec
         self.exit_buffer_sec = settings.market_exit_buffer_sec
-        self.order_offset = Decimal(str(settings.order_offset_cents))
+        # Note: order_offset_cents in settings is no longer used — dynamic offset is calculated per-signal
         self.volatility_per_second = settings.volatility_per_second
         self._entry_min_elapsed_sec = settings.market_entry_min_elapsed_sec
         self._min_price_gap = settings.min_price_gap_usd
@@ -229,6 +229,21 @@ class Strategy:
         if best_bid is None:
             return None
 
+        # Dynamic order offset: 20% of edge, capped at 2¢
+        # For $50 bankroll, this prevents overpaying on small edges
+        dynamic_offset = min(edge * 0.2, 0.02)
+        order_price = best_bid + Decimal(str(round(max(dynamic_offset, 0.005), 4)))
+
+        # Edge filter: skip if edge is below minimum threshold
+        if edge < self.min_edge:
+            logger.info(
+                "signal_skip",
+                reason="edge_too_low",
+                edge=round(edge, 4),
+                min_edge=self.min_edge,
+            )
+            return None
+
         # Calculate position size — use Kelly when edge is positive,
         # otherwise use max_position_pct as fixed size
         size = self.kelly_size(
@@ -242,19 +257,30 @@ class Strategy:
         if size <= 0:
             size = bankroll * self.max_position_pct
 
-        # Check concurrent exposure
+        # Convert dollar amount to share count for CLOB API
+        # CLOB API expects size = number of shares, price = cost per share
+        # Dollar cost = shares × price, so shares = dollars / price
+        if float(order_price) > 0:
+            shares = size / float(order_price)
+        else:
+            shares = 0
+
+        if shares <= 0:
+            return None
+
+        # Check concurrent exposure (in dollar terms)
         current_exposure = sum(
             float(p.size * p.avg_entry_price)
             for p in state.open_positions.values()
         )
         max_exposure = bankroll * self.max_concurrent_exposure_pct
-        if current_exposure + size > max_exposure:
-            size = max(0, max_exposure - current_exposure)
-            if size <= 0:
+        dollar_cost = shares * float(order_price)
+        if current_exposure + dollar_cost > max_exposure:
+            # Reduce shares to fit within exposure limit
+            available_dollars = max(0, max_exposure - current_exposure)
+            shares = available_dollars / float(order_price) if float(order_price) > 0 else 0
+            if shares <= 0:
                 return None
-
-        # Select maker order price: improve the best bid
-        order_price = best_bid + self.order_offset
 
         logger.info(
             "signal_generated",
@@ -262,7 +288,8 @@ class Strategy:
             true_prob=round(true_prob_up, 4),
             market_prob=round(market_price, 4),
             edge=round(edge, 4),
-            size=float(size),
+            shares=round(shares, 2),
+            dollar_cost=round(shares * float(order_price), 2),
             price=float(order_price),
             predicted_price=round(predicted_price, 2),
             chainlink=round(current, 2),
@@ -274,7 +301,7 @@ class Strategy:
             true_prob=true_prob_up if direction == "UP" else (1.0 - true_prob_up),
             market_prob=market_price,
             edge=edge,
-            kelly_size=Decimal(str(round(size, 2))),
+            kelly_size=Decimal(str(round(shares, 2))),
             token_id=token_id,
             price=order_price,
             timestamp_ms=int(time.time() * 1000),
@@ -311,17 +338,19 @@ class Strategy:
         anchor = float(market.anchor_price)
         chainlink_says_up = chainlink > anchor
 
+        # Check ALL positions — exit only if NONE are winning
+        any_winning = False
         for pos in state.open_positions.values():
             is_up_position = pos.token_id == market.token_id_up
             is_down_position = pos.token_id == market.token_id_down
 
             if is_up_position and chainlink_says_up:
-                return False  # We're winning — hold for $1.00
+                any_winning = True
             if is_down_position and not chainlink_says_up:
-                return False  # We're winning — hold for $1.00
+                any_winning = True
 
-        # Chainlink says we're losing — exit early to cut losses
-        return True
+        # Exit only if ALL positions are losing
+        return not any_winning
 
     @staticmethod
     def estimate_probability(
@@ -349,10 +378,12 @@ class Strategy:
         # Standard deviation of remaining price movement
         sigma = volatility_per_second * math.sqrt(remaining_seconds)
 
-        # Floor: prevent extreme confidence at very short remaining times.
-        # At 30s remaining, natural sigma = 0.0027 (above floor).
-        # Floor only activates below ~16s remaining as a safety net.
-        sigma = max(sigma, 0.002)
+        # Dynamic floor: at least 30 seconds worth of volatility
+        # This prevents overconfident signals at very short remaining times
+        # while staying proportional to actual market conditions.
+        # With default vol=0.0005: floor = 0.0005 * sqrt(30) ≈ 0.0027
+        sigma_floor = volatility_per_second * math.sqrt(30)
+        sigma = max(sigma, sigma_floor)
 
         if sigma == 0:
             return 1.0 if current_price >= anchor_price else 0.0

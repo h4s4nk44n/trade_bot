@@ -419,7 +419,13 @@ class PaperTrader(TraderInterface):
 
     @property
     def equity(self) -> Decimal:
-        """Current equity = bankroll + unrealized value of positions."""
+        """Current equity = bankroll + cost basis of open positions.
+
+        Uses cost basis (size × avg_entry_price), not mark-to-market,
+        because binary markets resolve to $1 or $0. This represents
+        total capital deployed, which is the correct risk measure.
+        For true mark-to-market, each position would need current_market_price.
+        """
         unrealized = sum(
             pos.size * pos.avg_entry_price
             for pos in self._positions.values()
