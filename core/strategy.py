@@ -65,7 +65,6 @@ class Strategy:
         # Cooldown: wait 2 seconds after anchor is set for price feeds to stabilize.
         # Right after cycle transition, Chainlink/Binance prices may be stale or
         # jumpy, causing wrong-direction bets.
-        import time
         anchor_age = time.monotonic() - state.anchor_set_mono
         if state.anchor_set_mono > 0 and anchor_age < 2.0:
             logger.info(
