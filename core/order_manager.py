@@ -92,7 +92,13 @@ class OrderManager:
                         active_orders=len(self._active_orders),
                     )
                     last_heartbeat = start
-                await self.trader.sync_state()
+                active_tokens = []
+                if self.state.current_market:
+                    active_tokens = [
+                        self.state.current_market.token_id_up,
+                        self.state.current_market.token_id_down,
+                    ]
+                await self.trader.sync_state(active_tokens)
                 self.bankroll = float(self.trader.current_bankroll)
 
                 self.state.open_positions = self.trader.current_positions

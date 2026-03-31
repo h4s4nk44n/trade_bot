@@ -117,6 +117,8 @@ class Bot:
             gamma_api_url=self.settings.gamma_api_url,
             playwright_fallback=self.settings.anchor_scrape_playwright_fallback,
         )
+        if self.settings.anchor_scrape_playwright_fallback:
+            await self.market_discovery.start_persistent_browser()
 
         # 6. Initialize strategy
         self.strategy = Strategy(self.settings)

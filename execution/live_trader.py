@@ -57,8 +57,8 @@ class LiveTrader(TraderInterface):
             self._client.set_api_creds(creds)
             self._initialized = True
 
-            # Immediately sync real balance from Polymarket
-            await self.sync_state()
+            # Immediately sync real balance from Polymarket (ignore positions until active market)
+            await self.sync_state(active_token_ids=[])
 
             # Debug: write balance info to file
             with open("data/balance_debug.txt", "w") as f:
@@ -203,7 +203,7 @@ class LiveTrader(TraderInterface):
             logger.error("live_get_balances_failed", error=str(e))
             return {"usdc": self._bankroll, "positions": {}}
 
-    async def sync_state(self) -> None:
+    async def sync_state(self, active_token_ids: Optional[list[str]] = None) -> None:
         """Poll CLOB API for current positions and balance.
 
         Called every order manager cycle to keep bankroll, positions,
@@ -250,6 +250,9 @@ class LiveTrader(TraderInterface):
 
             new_positions: dict[str, Position] = {}
             for token_id, data in net.items():
+                if active_token_ids is not None and token_id not in active_token_ids:
+                    continue
+                    
                 if data["size"] > 0:
                     avg_price = data["cost"] / data["size"] if data["size"] > 0 else Decimal("0")
                     new_positions[token_id] = Position(
