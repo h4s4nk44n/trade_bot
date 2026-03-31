@@ -229,9 +229,20 @@ class Strategy:
         if best_bid is None:
             return None
 
-        # Calculate position size — use Kelly when edge is positive,
+        # --- Minimum edge filter ---
+        # Skip trades where edge is too small to overcome slippage/spread
+        if edge < self.min_edge:
+            logger.info(
+                "signal_skip",
+                reason="edge_too_low",
+                edge=round(edge, 4),
+                min_edge=self.min_edge,
+            )
+            return None
+
+        # Calculate position size in DOLLARS — use Kelly when edge is positive,
         # otherwise use max_position_pct as fixed size
-        size = self.kelly_size(
+        dollar_size = self.kelly_size(
             estimated_prob=true_prob_up if direction == "UP" else (1.0 - true_prob_up),
             market_price=market_price,
             kelly_fraction=self.kelly_fraction,
@@ -239,22 +250,30 @@ class Strategy:
             max_position_pct=self.max_position_pct,
         )
 
-        if size <= 0:
-            size = bankroll * self.max_position_pct
+        if dollar_size <= 0:
+            dollar_size = bankroll * self.max_position_pct
 
-        # Check concurrent exposure
+        # Check concurrent exposure (in dollars)
         current_exposure = sum(
             float(p.size * p.avg_entry_price)
             for p in state.open_positions.values()
         )
         max_exposure = bankroll * self.max_concurrent_exposure_pct
-        if current_exposure + size > max_exposure:
-            size = max(0, max_exposure - current_exposure)
-            if size <= 0:
+        if current_exposure + dollar_size > max_exposure:
+            dollar_size = max(0, max_exposure - current_exposure)
+            if dollar_size <= 0:
                 return None
 
         # Select maker order price: improve the best bid
         order_price = best_bid + self.order_offset
+
+        # Convert dollar amount to share count:
+        # Polymarket CLOB size = number of shares, not dollar amount.
+        # Cost = shares × price, so shares = dollars / price
+        order_price_f = float(order_price)
+        if order_price_f <= 0:
+            return None
+        shares = dollar_size / order_price_f
 
         logger.info(
             "signal_generated",
@@ -262,7 +281,8 @@ class Strategy:
             true_prob=round(true_prob_up, 4),
             market_prob=round(market_price, 4),
             edge=round(edge, 4),
-            size=float(size),
+            dollar_size=round(dollar_size, 2),
+            shares=round(shares, 2),
             price=float(order_price),
             predicted_price=round(predicted_price, 2),
             chainlink=round(current, 2),
@@ -274,7 +294,7 @@ class Strategy:
             true_prob=true_prob_up if direction == "UP" else (1.0 - true_prob_up),
             market_prob=market_price,
             edge=edge,
-            kelly_size=Decimal(str(round(size, 2))),
+            kelly_size=Decimal(str(round(shares, 2))),
             token_id=token_id,
             price=order_price,
             timestamp_ms=int(time.time() * 1000),
@@ -350,9 +370,10 @@ class Strategy:
         sigma = volatility_per_second * math.sqrt(remaining_seconds)
 
         # Floor: prevent extreme confidence at very short remaining times.
-        # At 30s remaining, natural sigma = 0.0027 (above floor).
-        # Floor only activates below ~16s remaining as a safety net.
-        sigma = max(sigma, 0.002)
+        # Use volatility-aware floor = vol × sqrt(10s) so it scales with
+        # actual market conditions rather than a fixed constant.
+        sigma_floor = volatility_per_second * math.sqrt(10.0)
+        sigma = max(sigma, sigma_floor, 0.001)  # absolute minimum 0.1%
 
         if sigma == 0:
             return 1.0 if current_price >= anchor_price else 0.0
@@ -441,7 +462,7 @@ class Strategy:
                         # Floor: prevent overconfident estimates in quiet markets
                         self._calibrated_vol = max(
                             realized_std / math.sqrt(avg_dt_s),
-                            0.0002,  # Never below 0.02%/sec
+                            0.0003,  # Never below 0.03%/sec — more conservative
                         )
 
         self._last_vol_price = price

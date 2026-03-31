@@ -54,13 +54,17 @@ class RiskManager:
             return False
 
         # 3. Per-trade cap
+        # kelly_size = number of shares, price = per-share cost
+        # Dollar cost of this trade = shares × price
         trade_value = float(signal.kelly_size) * float(signal.price)
         max_trade = self.risk_state.bankroll * self.settings.max_position_pct
-        if trade_value > max_trade:
+        if trade_value > max_trade * 1.05:  # 5% tolerance for rounding
             logger.warning(
                 "per_trade_cap_exceeded",
-                trade_value=trade_value,
-                max_trade=max_trade,
+                trade_value=round(trade_value, 2),
+                max_trade=round(max_trade, 2),
+                shares=float(signal.kelly_size),
+                price=float(signal.price),
             )
             return False
 
